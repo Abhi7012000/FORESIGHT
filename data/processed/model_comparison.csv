@@ -1,0 +1,4 @@
+model,backtest_wape
+Seasonal Naive,33.71
+Random Forest,24.812323069873617
+Tuned Gradient Boosting,24.210829241004422
