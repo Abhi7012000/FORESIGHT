@@ -83,7 +83,7 @@ FORESIGHT/
 Clone the repository:
 
 ```bash
-git clone YOUR_GITHUB_REPOSITORY_URL
+git clone https://github.com/Abhi7012000/FORESIGHT.git
 cd FORESIGHT
 ```
 
@@ -113,9 +113,15 @@ streamlit run app/dashboard.py
 
 ## ▶️ Run the API
 
-Start the FastAPI service using the command configured for the project.
+Start the FastAPI service:
 
-Refer to `service/README.md` for API-specific instructions.
+```bash
+uvicorn service.api:app --reload
+```
+
+API documentation:
+- Local: http://127.0.0.1:8000/docs
+- Deployed: https://foresight-api-xq0j.onrender.com/docs
 
 ## 📊 Model Evaluation
 
@@ -125,9 +131,9 @@ The reported performance values should be interpreted with reference to the proj
 
 ## ⚠️ Data Notes
 
-- Raw data is excluded from version control.
+- Raw inventory data is included for project reproducibility.
 - Processed datasets are stored in `data/processed/`.
-- Dataset limitations and quality notes are documented in the `reports/` directory.
+- Data quality issues and limitations are documented in the project reports.
 - Forecast and inventory risk results depend on the available source data.
 
 ## 🔮 Future Improvements
