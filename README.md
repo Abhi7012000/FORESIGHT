@@ -120,8 +120,9 @@ uvicorn service.api:app --reload
 ```
 
 API documentation:
-- Local: http://127.0.0.1:8000/docs
-- Deployed: https://foresight-api-xq0j.onrender.com/docs
+- Local API Docs: http://127.0.0.1:8000/docs 
+- Live API Docs: https://foresight-api-xq0j.onrender.com/docs 
+- Live API Base URL: https://foresight-api-xq0j.onrender.com 
 
 ## 📊 Model Evaluation
 
