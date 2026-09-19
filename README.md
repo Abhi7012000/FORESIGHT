@@ -17,6 +17,25 @@ FORESIGHT is a data-driven demand forecasting and inventory risk intelligence pr
 - Interactive Streamlit dashboard
 - FastAPI service
 - CSV export for filtered risk data
+- User-uploaded CSV data support
+- Dynamic dashboard updates based on uploaded data
+- Uploaded data preview and validation
+
+## 📂 User Data Upload
+
+FORESIGHT allows users to upload supported CSV files directly through the Streamlit dashboard.
+
+After uploading compatible data, the dashboard updates its analytical sections, including:
+
+- Uploaded data preview
+- SKU-level insights
+- Forecast and inventory metrics
+- Inventory risk analysis
+- Reorder and markdown recommendations
+- Charts and analytical tables
+- Filtered CSV export
+
+The upload workflow requires supported CSV structures, expected columns, and compatible data relationships.
 
 ## 🏗️ Project Structure
 
@@ -24,11 +43,23 @@ FORESIGHT is a data-driven demand forecasting and inventory risk intelligence pr
 FORESIGHT/
 │
 ├── app/
-│   └── dashboard.py
+│   ├── dashboard.py
+│   └── universal_data_loader.py
 │
 ├── data/
 │   ├── raw/
+│   │   └── retail_store_inventory.csv
+│   │
 │   └── processed/
+│       ├── calendar.csv
+│       ├── forecast_results.csv
+│       ├── foresight_model.pkl
+│       ├── inventory_snapshots.csv
+│       ├── model_comparison.csv
+│       ├── sales_daily.csv
+│       ├── sku_master.csv
+│       ├── sku_risk_results.csv
+│       └── weekly_sales.csv
 │
 ├── notebooks/
 │   ├── 01_data_check.ipynb
@@ -36,11 +67,15 @@ FORESIGHT/
 │   └── 03_modeling.ipynb
 │
 ├── reports/
+│   ├── baseline_results.csv
+│   ├── data_quality_notes.md
+│   ├── eda_insight_memo.md
+│   └── FORESIGHT_REPORT.pptx
 │
 ├── service/
 │   ├── api.py
-│   ├── requirements.txt
-│   └── README.md
+│   ├── README.md
+│   └── requirements.txt
 │
 ├── src/
 │   └── pipeline.py
@@ -120,9 +155,10 @@ uvicorn service.api:app --reload
 ```
 
 API documentation:
-- Local API Docs: http://127.0.0.1:8000/docs 
-- Live API Docs: https://foresight-api-xq0j.onrender.com/docs 
-- Live API Base URL: https://foresight-api-xq0j.onrender.com 
+
+- Local API Docs: http://127.0.0.1:8000/docs
+- Live API Docs: https://foresight-api-xq0j.onrender.com/docs
+- Live API Base URL: https://foresight-api-xq0j.onrender.com
 
 ## 📊 Model Evaluation
 
@@ -148,9 +184,9 @@ The reported performance values should be interpreted with reference to the proj
 
 ## 👨‍💻 Author
 
-Abhinav Kumar Singh
+Abhinav Kumar Singh  
 Prachi Hedau
-Bharath H R
+
 ## 📄 License
 
 This project is intended for educational, portfolio, and demonstration purposes.
