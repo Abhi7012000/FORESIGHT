@@ -466,119 +466,144 @@ forecast_data["week_start"] = pd.to_datetime(
 # BUILD RISK DATA FROM UPLOADED BUSINESS CSVs
 # ============================================================
 # When CSVs are uploaded, calculate SKU-level operational metrics
-# from the uploaded inventory and sales data instead of relying only
-# on the pre-generated risk result file.
+# using flexible column-name detection across the uploaded files.
+
 if uploaded_files and "sku_id" in uploaded_df.columns:
     uploaded_work = uploaded_df.copy()
 
-    # ========================================================
-    # USE THE COMPLETE SKU UNIVERSE
-    # ========================================================
-    # Do not restrict the dashboard to sku_master only.
-    # The uploaded inventory file contains the complete 200-SKU
-    # universe, while the sales/master files may contain fewer SKUs.
-
+    # Normalize identifiers and source names
     uploaded_work["sku_id"] = (
-        uploaded_work["sku_id"]
-        .astype("string")
-        .str.strip()
+        uploaded_work["sku_id"].astype("string").str.strip()
     )
-
+    uploaded_work["source_file"] = (
+        uploaded_work.get("source_file", "")
+        .astype("string").str.lower().str.strip()
+    )
     uploaded_work = uploaded_work[
         uploaded_work["sku_id"].notna()
         & uploaded_work["sku_id"].ne("")
         & uploaded_work["sku_id"].ne("<NA>")
     ].copy()
 
-    # Convert numeric columns safely.
-    for numeric_column in [
-        "units_sold",
-        "Current_Stock",
-        "Inventory_Value",
-    ]:
-        if numeric_column in uploaded_work.columns:
-            uploaded_work[numeric_column] = pd.to_numeric(
-                uploaded_work[numeric_column],
-                errors="coerce"
-            ).fillna(0)
+    # Find columns independent of capitalization/spacing
+    normalized_columns = {
+        str(c).strip().lower().replace(" ", "_"): c
+        for c in uploaded_work.columns
+    }
 
-    # Keep every unique SKU from all uploaded business files.
-    # This ensures inventory-only SKUs are also displayed.
-    all_uploaded_skus = (
-        uploaded_work["sku_id"]
-        .dropna()
-        .astype(str)
-        .str.strip()
-        .unique()
-    )
+    def find_column(names):
+        for name in names:
+            if name in normalized_columns:
+                return normalized_columns[name]
+        return None
 
+    date_column = find_column(["date", "day", "timestamp"])
+    sales_column = find_column(["units_sold", "actual_demand", "sales"])
+    inventory_column = find_column([
+        "inventory_level", "current_stock", "available_inventory",
+        "inventory", "stock", "units_in_stock"
+    ])
+    price_column = find_column(["price", "unit_price", "selling_price"])
+    inventory_value_column = find_column([
+        "inventory_value", "stock_value", "rupee_value_at_risk"
+    ])
+
+    # Numeric conversion
+    for column in [sales_column, inventory_column, price_column, inventory_value_column]:
+        if column is not None:
+            uploaded_work[column] = pd.to_numeric(
+                uploaded_work[column], errors="coerce"
+            )
+
+    all_uploaded_skus = uploaded_work["sku_id"].unique()
     st.sidebar.success(
         f"Complete SKU universe detected: {len(all_uploaded_skus)} SKUs"
     )
 
-    # Demand is calculated only from rows that contain sales data.
-    if "units_sold" in uploaded_work.columns:
-        sales_by_sku = (
-            uploaded_work.groupby("sku_id", as_index=False)["units_sold"]
+    # ------------------------------------------------------------
+    # DEMAND: use sales rows only and convert historical sales to
+    # a comparable 12-week operational demand horizon (84 days).
+    # ------------------------------------------------------------
+    if sales_column is not None:
+        sales_rows = uploaded_work[uploaded_work[sales_column].notna()].copy()
+        if date_column is not None and not sales_rows.empty:
+            sales_rows[date_column] = pd.to_datetime(
+                sales_rows[date_column], errors="coerce"
+            )
+            valid_dates = sales_rows[date_column].dropna()
+            observed_days = max((valid_dates.max() - valid_dates.min()).days + 1, 1) \
+                if not valid_dates.empty else 1
+        else:
+            observed_days = 1
+
+        demand_by_sku = (
+            sales_rows.groupby("sku_id", as_index=False)[sales_column]
             .sum()
-            .rename(columns={"units_sold": "forecast_demand"})
+            .rename(columns={sales_column: "historical_units_sold"})
         )
+        demand_by_sku["forecast_demand"] = (
+            demand_by_sku["historical_units_sold"] / observed_days * 84
+        )
+        demand_by_sku = demand_by_sku[["sku_id", "forecast_demand"]]
     else:
-        sales_by_sku = pd.DataFrame({
+        demand_by_sku = pd.DataFrame({
             "sku_id": all_uploaded_skus,
-            "forecast_demand": 0
+            "forecast_demand": 0.0
         })
 
-    # Inventory is calculated only from available inventory fields.
-    inventory_columns = ["sku_id"]
+    # ------------------------------------------------------------
+    # INVENTORY: use inventory rows only and take the latest value,
+    # not the maximum across all dates.
+    # ------------------------------------------------------------
+    if inventory_column is not None:
+        inventory_rows = uploaded_work[
+            uploaded_work[inventory_column].notna()
+        ].copy()
+        if date_column is not None:
+            inventory_rows[date_column] = pd.to_datetime(
+                inventory_rows[date_column], errors="coerce"
+            )
+            inventory_rows = inventory_rows.sort_values(date_column)
 
-    if "Current_Stock" in uploaded_work.columns:
-        inventory_columns.append("Current_Stock")
+        inventory_by_sku = (
+            inventory_rows.groupby("sku_id", as_index=False)
+            .tail(1)[["sku_id", inventory_column]]
+            .rename(columns={inventory_column: "available_inventory"})
+        )
+    else:
+        inventory_by_sku = pd.DataFrame({
+            "sku_id": all_uploaded_skus,
+            "available_inventory": 0.0
+        })
 
-    if "Inventory_Value" in uploaded_work.columns:
-        inventory_columns.append("Inventory_Value")
-
-    inventory_by_sku = (
-        uploaded_work[inventory_columns]
-        .groupby("sku_id", as_index=False)
-        .max()
-    )
-
-    # Start with all SKUs, then merge demand and inventory metrics.
-    sku_universe = pd.DataFrame({"sku_id": all_uploaded_skus})
+    # ------------------------------------------------------------
+    # PRICE: calculate latest/average unit price for value-at-risk.
+    # Value at risk = stockout shortfall × unit price.
+    # ------------------------------------------------------------
+    if price_column is not None:
+        price_rows = uploaded_work[uploaded_work[price_column].notna()].copy()
+        price_by_sku = (
+            price_rows.groupby("sku_id", as_index=False)[price_column]
+            .mean()
+            .rename(columns={price_column: "unit_price"})
+        )
+    else:
+        price_by_sku = pd.DataFrame({
+            "sku_id": all_uploaded_skus,
+            "unit_price": 0.0
+        })
 
     risk_data = (
-        sku_universe
-        .merge(sales_by_sku, on="sku_id", how="left")
+        pd.DataFrame({"sku_id": all_uploaded_skus})
+        .merge(demand_by_sku, on="sku_id", how="left")
         .merge(inventory_by_sku, on="sku_id", how="left")
+        .merge(price_by_sku, on="sku_id", how="left")
         .fillna(0)
     )
 
-    risk_data = risk_data.rename(
-        columns={
-            "Current_Stock": "available_inventory",
-            "Inventory_Value": "rupee_value_at_risk"
-        }
-    )
-
-    if "forecast_demand" not in risk_data.columns:
-        risk_data["forecast_demand"] = 0
-
-    if "available_inventory" not in risk_data.columns:
-        risk_data["available_inventory"] = 0
-
-    if "rupee_value_at_risk" not in risk_data.columns:
-        risk_data["rupee_value_at_risk"] = 0
-
-    # Ensure all KPI columns are numeric.
-    for metric_column in [
-        "forecast_demand",
-        "available_inventory",
-        "rupee_value_at_risk",
-    ]:
-        risk_data[metric_column] = pd.to_numeric(
-            risk_data[metric_column],
-            errors="coerce"
+    for column in ["forecast_demand", "available_inventory", "unit_price"]:
+        risk_data[column] = pd.to_numeric(
+            risk_data[column], errors="coerce"
         ).fillna(0)
 
     risk_data["inventory_coverage"] = (
@@ -586,46 +611,28 @@ if uploaded_files and "sku_id" in uploaded_df.columns:
         / risk_data["forecast_demand"].replace(0, 1)
     )
 
-    # Ensure every SKU receives a valid risk classification.
-    risk_data["inventory_coverage"] = pd.to_numeric(
-        risk_data["inventory_coverage"],
-        errors="coerce"
-    ).fillna(0)
-
     risk_data["risk_level"] = "Healthy"
-
     risk_data.loc[
-        risk_data["inventory_coverage"] < 0.25,
-        "risk_level"
+        risk_data["inventory_coverage"] < 0.25, "risk_level"
     ] = "Reorder Now"
-
     risk_data.loc[
         (risk_data["inventory_coverage"] >= 0.25)
-        & (risk_data["inventory_coverage"] < 0.75),
-        "risk_level"
+        & (risk_data["inventory_coverage"] < 0.75), "risk_level"
     ] = "Watch / Volatile"
-
     risk_data.loc[
         (risk_data["inventory_coverage"] >= 0.75)
-        & (risk_data["inventory_coverage"] < 1.0),
-        "risk_level"
+        & (risk_data["inventory_coverage"] < 1.0), "risk_level"
     ] = "Markdown/Clear"
 
-
-    # Add downstream risk metrics used by tables and decision grid
     risk_data["stockout_shortfall_units"] = (
         risk_data["forecast_demand"] - risk_data["available_inventory"]
     ).clip(lower=0)
-
     risk_data["overstock_excess_units"] = (
         risk_data["available_inventory"] - risk_data["forecast_demand"]
     ).clip(lower=0)
-
-    # Normalize risk labels so summary cards and filters use the same values
-    risk_data["risk_level"] = risk_data["risk_level"].replace({
-        "Watch/Volatile": "Watch / Volatile",
-        "Markdown / Clear": "Markdown/Clear",
-    }).fillna("Healthy")
+    risk_data["rupee_value_at_risk"] = (
+        risk_data["stockout_shortfall_units"] * risk_data["unit_price"]
+    )
 
     risk_data["recommended_action"] = risk_data["risk_level"].map({
         "Reorder Now": "Reorder inventory",
@@ -723,7 +730,7 @@ selected_category = st.sidebar.selectbox(
 
 display_data = risk_data.copy()
 
-
+display_data["sku_id"] = display_data["sku_id"].astype(str).str.strip()
 # -------------------- APPLY SKU FILTER --------------------
 
 if selected_sku != "All":
@@ -767,8 +774,9 @@ if selected_category != "All":
             .reset_index()
         )
         selected_category_skus = sku_category.loc[
-            sku_category["category"] == selected_category, "sku_id"
-        ]
+    sku_category["category"].str.strip() == selected_category.strip(),
+    "sku_id"
+ ].astype(str).str.strip()
         display_data = display_data[
             display_data["sku_id"].astype(str).isin(selected_category_skus.astype(str))
         ].copy()
