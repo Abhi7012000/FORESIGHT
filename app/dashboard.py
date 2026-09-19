@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-
+from universal_data_loader import load_csv_file
 
 # ============================================================
 # PAGE CONFIGURATION
@@ -356,6 +356,92 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# ==============================
+# UNIVERSAL CSV UPLOAD SYSTEM
+# ==============================
+
+st.sidebar.header("📂 Upload Business Data")
+
+uploaded_files = st.sidebar.file_uploader(
+    "Upload one or multiple CSV files",
+    type=["csv"],
+    accept_multiple_files=True
+)
+
+uploaded_dataframes = []
+
+if uploaded_files:
+
+    try:
+        for file in uploaded_files:
+
+            df, metadata = load_csv_file(file)
+
+            df["source_file"] = file.name
+
+            uploaded_dataframes.append(df)
+
+        st.success(
+            f"✅ {len(uploaded_dataframes)} CSV file(s) uploaded successfully!"
+        )
+
+        st.subheader("📊 Uploaded Data Preview")
+
+        for df in uploaded_dataframes:
+
+            st.write(
+                f"**File:** {df['source_file'].iloc[0]}"
+            )
+
+            st.write(
+                f"Rows: {df.shape[0]} | Columns: {df.shape[1]}"
+            )
+
+            st.dataframe(
+                df.head(10),
+                width="stretch"
+            )
+
+        uploaded_df = pd.concat(
+            uploaded_dataframes,
+            ignore_index=True,
+            sort=False
+        )
+
+
+        if uploaded_files:
+            st.subheader("🔍 Standardized Uploaded Columns")
+
+            st.write(
+                sorted(uploaded_df.columns.tolist())
+        )
+
+
+        st.subheader("📦 Combined Uploaded Data")
+
+        st.write(f"Total Rows: {uploaded_df.shape[0]}")
+        st.write(f"Total Columns: {uploaded_df.shape[1]}")
+
+        # SKU mapping diagnostics: identify duplicate or inconsistent SKU identities
+        if "sku_id" in uploaded_df.columns and "source_file" in uploaded_df.columns:
+            sku_source_check = (
+                uploaded_df.groupby("source_file")["sku_id"]
+                .nunique()
+                .reset_index(name="unique_skus")
+            )
+            st.caption("SKU mapping check")
+            st.dataframe(sku_source_check, use_container_width=True, hide_index=True)
+
+        st.dataframe(
+            uploaded_df.head(10),
+            width="stretch"
+        )
+
+    except Exception as error:
+
+        st.error(
+            f"❌ Upload Error: {error}"
+        )
 
 # ============================================================
 # LOAD DATA
@@ -376,13 +462,189 @@ forecast_data["week_start"] = pd.to_datetime(
     forecast_data["week_start"]
 )
 
+# ============================================================
+# BUILD RISK DATA FROM UPLOADED BUSINESS CSVs
+# ============================================================
+# When CSVs are uploaded, calculate SKU-level operational metrics
+# from the uploaded inventory and sales data instead of relying only
+# on the pre-generated risk result file.
+if uploaded_files and "sku_id" in uploaded_df.columns:
+    uploaded_work = uploaded_df.copy()
+
+    # ========================================================
+    # USE THE COMPLETE SKU UNIVERSE
+    # ========================================================
+    # Do not restrict the dashboard to sku_master only.
+    # The uploaded inventory file contains the complete 200-SKU
+    # universe, while the sales/master files may contain fewer SKUs.
+
+    uploaded_work["sku_id"] = (
+        uploaded_work["sku_id"]
+        .astype("string")
+        .str.strip()
+    )
+
+    uploaded_work = uploaded_work[
+        uploaded_work["sku_id"].notna()
+        & uploaded_work["sku_id"].ne("")
+        & uploaded_work["sku_id"].ne("<NA>")
+    ].copy()
+
+    # Convert numeric columns safely.
+    for numeric_column in [
+        "units_sold",
+        "Current_Stock",
+        "Inventory_Value",
+    ]:
+        if numeric_column in uploaded_work.columns:
+            uploaded_work[numeric_column] = pd.to_numeric(
+                uploaded_work[numeric_column],
+                errors="coerce"
+            ).fillna(0)
+
+    # Keep every unique SKU from all uploaded business files.
+    # This ensures inventory-only SKUs are also displayed.
+    all_uploaded_skus = (
+        uploaded_work["sku_id"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .unique()
+    )
+
+    st.sidebar.success(
+        f"Complete SKU universe detected: {len(all_uploaded_skus)} SKUs"
+    )
+
+    # Demand is calculated only from rows that contain sales data.
+    if "units_sold" in uploaded_work.columns:
+        sales_by_sku = (
+            uploaded_work.groupby("sku_id", as_index=False)["units_sold"]
+            .sum()
+            .rename(columns={"units_sold": "forecast_demand"})
+        )
+    else:
+        sales_by_sku = pd.DataFrame({
+            "sku_id": all_uploaded_skus,
+            "forecast_demand": 0
+        })
+
+    # Inventory is calculated only from available inventory fields.
+    inventory_columns = ["sku_id"]
+
+    if "Current_Stock" in uploaded_work.columns:
+        inventory_columns.append("Current_Stock")
+
+    if "Inventory_Value" in uploaded_work.columns:
+        inventory_columns.append("Inventory_Value")
+
+    inventory_by_sku = (
+        uploaded_work[inventory_columns]
+        .groupby("sku_id", as_index=False)
+        .max()
+    )
+
+    # Start with all SKUs, then merge demand and inventory metrics.
+    sku_universe = pd.DataFrame({"sku_id": all_uploaded_skus})
+
+    risk_data = (
+        sku_universe
+        .merge(sales_by_sku, on="sku_id", how="left")
+        .merge(inventory_by_sku, on="sku_id", how="left")
+        .fillna(0)
+    )
+
+    risk_data = risk_data.rename(
+        columns={
+            "Current_Stock": "available_inventory",
+            "Inventory_Value": "rupee_value_at_risk"
+        }
+    )
+
+    if "forecast_demand" not in risk_data.columns:
+        risk_data["forecast_demand"] = 0
+
+    if "available_inventory" not in risk_data.columns:
+        risk_data["available_inventory"] = 0
+
+    if "rupee_value_at_risk" not in risk_data.columns:
+        risk_data["rupee_value_at_risk"] = 0
+
+    # Ensure all KPI columns are numeric.
+    for metric_column in [
+        "forecast_demand",
+        "available_inventory",
+        "rupee_value_at_risk",
+    ]:
+        risk_data[metric_column] = pd.to_numeric(
+            risk_data[metric_column],
+            errors="coerce"
+        ).fillna(0)
+
+    risk_data["inventory_coverage"] = (
+        risk_data["available_inventory"]
+        / risk_data["forecast_demand"].replace(0, 1)
+    )
+
+    # Ensure every SKU receives a valid risk classification.
+    risk_data["inventory_coverage"] = pd.to_numeric(
+        risk_data["inventory_coverage"],
+        errors="coerce"
+    ).fillna(0)
+
+    risk_data["risk_level"] = "Healthy"
+
+    risk_data.loc[
+        risk_data["inventory_coverage"] < 0.25,
+        "risk_level"
+    ] = "Reorder Now"
+
+    risk_data.loc[
+        (risk_data["inventory_coverage"] >= 0.25)
+        & (risk_data["inventory_coverage"] < 0.75),
+        "risk_level"
+    ] = "Watch / Volatile"
+
+    risk_data.loc[
+        (risk_data["inventory_coverage"] >= 0.75)
+        & (risk_data["inventory_coverage"] < 1.0),
+        "risk_level"
+    ] = "Markdown/Clear"
+
+
+    # Add downstream risk metrics used by tables and decision grid
+    risk_data["stockout_shortfall_units"] = (
+        risk_data["forecast_demand"] - risk_data["available_inventory"]
+    ).clip(lower=0)
+
+    risk_data["overstock_excess_units"] = (
+        risk_data["available_inventory"] - risk_data["forecast_demand"]
+    ).clip(lower=0)
+
+    # Normalize risk labels so summary cards and filters use the same values
+    risk_data["risk_level"] = risk_data["risk_level"].replace({
+        "Watch/Volatile": "Watch / Volatile",
+        "Markdown / Clear": "Markdown/Clear",
+    }).fillna("Healthy")
+
+    risk_data["recommended_action"] = risk_data["risk_level"].map({
+        "Reorder Now": "Reorder inventory",
+        "Watch / Volatile": "Monitor demand and stock",
+        "Markdown/Clear": "Consider markdown",
+        "Healthy": "No immediate action"
+    }).fillna("Review inventory")
+
+
 if forecast_data["week_start"].isna().any():
     st.warning("Some forecast dates could not be read.")
 
 # Load original dataset for category filtering
-raw_data = pd.read_csv(
-    "data/raw/retail_store_inventory.csv"
-)
+if uploaded_files:
+    raw_data = uploaded_df.copy()
+else:
+    raw_data = pd.read_csv(
+        "data/raw/retail_store_inventory.csv"
+    )
 
 if risk_data.empty:
     st.warning("No risk data available.")
@@ -434,10 +696,21 @@ selected_risk = st.sidebar.selectbox(
 
 # -------------------- CATEGORY FILTER --------------------
 
-# Create category options from the original dataset
-category_options = ["All"] + sorted(
-    raw_data["Category"].dropna().unique().tolist()
-)
+# Create category options from uploaded data
+if "category" in raw_data.columns:
+
+    category_options = ["All"] + sorted(
+        raw_data["category"]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+
+else:
+
+    category_options = ["All"]
+
 
 selected_category = st.sidebar.selectbox(
     "Category",
@@ -445,66 +718,62 @@ selected_category = st.sidebar.selectbox(
 )
 
 
-# ============================================================
-# APPLY FILTERS
-# ============================================================
 
-# Start with complete risk dataset
+# APPLY CATEGORY FILTER
+
 display_data = risk_data.copy()
 
 
-# Apply SKU filter
-if selected_sku != "All":
+# -------------------- APPLY SKU FILTER --------------------
 
+if selected_sku != "All":
     display_data = display_data[
         display_data["sku_id"] == selected_sku
     ].copy()
 
 
-# Apply risk level filter
-if selected_risk != "All":
+# -------------------- APPLY RISK FILTER --------------------
 
+if selected_risk != "All":
     display_data = display_data[
         display_data["risk_level"] == selected_risk
     ].copy()
 
 
-# Apply category filter
-if selected_category != "All":
 
-    # Create SKU ID from the original dataset
+if selected_category != "All":
     category_skus = raw_data.copy()
 
-    category_skus["sku_id"] = (
-        category_skus["Store ID"].astype(str)
-        + "_"
-        + category_skus["Product ID"].astype(str)
-    )
-
-    # Assign the most frequent category to each SKU
-    sku_category = (
-        category_skus
-        .dropna(subset=["Category"])
-        .groupby("sku_id")["Category"]
-        .agg(
-            lambda x: x.mode().iloc[0]
-            if not x.mode().empty
-            else "Unknown"
+    if "category" in category_skus.columns and "sku_id" in category_skus.columns:
+        category_skus["sku_id"] = category_skus["sku_id"].astype(str)
+    elif (
+        "category" in category_skus.columns
+        and "store_id" in category_skus.columns
+        and "product_id" in category_skus.columns
+    ):
+        category_skus["sku_id"] = (
+            category_skus["store_id"].astype(str) + "_" +
+            category_skus["product_id"].astype(str)
         )
-        .reset_index()
-    )
+    else:
+        category_skus = pd.DataFrame()
 
-    # Keep SKUs belonging to the selected category
-    selected_category_skus = sku_category[
-        sku_category["Category"] == selected_category
-    ]["sku_id"]
-
-    display_data = display_data[
-        display_data["sku_id"].isin(
-            selected_category_skus
+    if not category_skus.empty:
+        sku_category = (
+            category_skus[category_skus["category"].notna()]
+            .assign(category=lambda df: df["category"].astype(str).str.strip())
+            .groupby("sku_id")["category"]
+            .agg(lambda x: x.mode().iloc[0] if not x.mode().empty else "Unknown")
+            .reset_index()
         )
-    ].copy()
-
+        selected_category_skus = sku_category.loc[
+            sku_category["category"] == selected_category, "sku_id"
+        ]
+        display_data = display_data[
+            display_data["sku_id"].astype(str).isin(selected_category_skus.astype(str))
+        ].copy()
+    else:
+        st.warning("Category filtering is unavailable for this dataset.")
 
 if display_data.empty:
     st.warning("No SKUs match the selected filters.")
@@ -554,7 +823,7 @@ risk_summary.columns = [
 # Display risk summary table
 st.dataframe(
     risk_summary,
-    use_container_width=True,
+    width="stretch",
     hide_index=True
 )
 
@@ -602,7 +871,7 @@ with col3:
     # SKUs with both risk conditions
     st.metric(
         "Watch / Volatile",
-        risk_counts.get("Watch/Volatile", 0)
+        risk_counts.get("Watch / Volatile", 0)
     )
 
 
@@ -673,18 +942,31 @@ else:
     ].copy()
 
 
+# Clean and rename chart series for readable labels
+if not chart_data.empty:
+    for col in ["units_sold", "gb_prediction"]:
+        if col in chart_data.columns:
+            chart_data[col] = pd.to_numeric(chart_data[col], errors="coerce").fillna(0)
+    chart_data = chart_data.rename(columns={
+        "units_sold": "Actual Demand",
+        "gb_prediction": "Forecast Demand"
+    })
+
 # Set week as chart index
 chart_data = chart_data.set_index("week_start")
 
 
 # Display actual and forecast demand
-st.line_chart(
-    chart_data,
-    y=[
-        "units_sold",
-        "gb_prediction"
-    ]
-)
+if chart_data.empty:
+    st.info("No forecast-versus-actual data is available for the selected filters and date range.")
+else:
+    st.line_chart(
+        chart_data,
+        y=[
+            "Actual Demand",
+            "Forecast Demand"
+        ]
+    )
 
 
 # ============================================================
@@ -732,14 +1014,17 @@ uncertainty_data = uncertainty_data.set_index(
 
 
 # Display forecast uncertainty
-st.line_chart(
-    uncertainty_data,
-    y=[
-        "gb_prediction",
-        "forecast_lower_80",
-        "forecast_upper_80"
-    ]
-)
+if uncertainty_data.empty:
+    st.info("No forecast uncertainty data is available for the selected filters and date range.")
+else:
+    st.line_chart(
+        uncertainty_data,
+        y=[
+            "gb_prediction",
+            "forecast_lower_80",
+            "forecast_upper_80"
+        ]
+    )
 
 
 # ============================================================
@@ -861,7 +1146,7 @@ st.dataframe(
             "recommended_action"
         ]
     ],
-    use_container_width=True,
+    width="stretch",
     hide_index=True
 )
 
@@ -898,7 +1183,7 @@ st.dataframe(
             "recommended_action"
         ]
     ],
-    use_container_width=True,
+    width="stretch",
     hide_index=True
 )
 
@@ -929,7 +1214,7 @@ decision_grid = display_data[
 # Display decision grid
 st.dataframe(
     decision_grid,
-    use_container_width=True,
+    width="stretch",
     hide_index=True
 )
 
